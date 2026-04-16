@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 import requests
 from supabase import create_client, Client
-
+import datetime
 
 load_dotenv()
 
@@ -44,42 +44,63 @@ async def handle_messages(request: Request):
     payload = await request.json()
     
     try:
-        # Navigate the JSON structure Meta sends
         value = payload['entry'][0]['changes'][0]['value']
         messages = value.get('messages')
         
-        if messages:
-            msg = messages[0]
-            sender_number = msg.get("from") # This is the user's phone number
+        if not messages:
+            return {"status": "no messages"}
+
+        msg = messages[0]
+        sender_number = msg.get("from")
+        clean_number = sender_number.replace("+", "")
+
+        # 1. Identity Check
+        user_profile = supabase.table("profiles").select("*") \
+            .or_(f"patient_phone.ilike.%{clean_number}%,attendant_phone.ilike.%{clean_number}%") \
+            .execute()
+
+        if not user_profile.data:
+            send_template_message(sender_number, "I don't recognize this number. Please register first!")
+            return {"status": "unrecognized"}
+
+        patient_data = user_profile.data[0]
+        patient_id = patient_data['id']
+        patient_name = patient_data['patient_name']
+
+        # 2. Handle BUTTON CLICKS (Adherence)
+        if msg.get("type") == "interactive":
+            button_reply = msg['interactive']['button_reply']
+            button_id = button_reply['id'] # Format: "taken_REMINDER_ID"
             
-            if msg.get("type") == "text":
-                user_text = msg["text"]["body"]
-                
-                # --- NEW: SUPABASE LOOKUP ---
-                # Search for the user by their phone number
-                # Clean the incoming number just in case
-                clean_number = sender_number.replace("+", "")
+            status = "taken" if "taken_" in button_id else "skipped"
+            reminder_id = button_id.replace("taken_", "").replace("skipped_", "")
 
-                # Search for the user
-                user_profile = supabase.table("profiles") \
-                .select("*") \
-                .or_(f"patient_phone.ilike.%{clean_number}%,attendant_phone.ilike.%{clean_number}%") \
-                .execute()
+            # Log to Supabase
+            supabase.table("adherence_logs").insert({
+                "profile_id": patient_id,
+                "reminder_id": reminder_id,
+                "status": status,
+                "scheduled_time": datetime.now().isoformat(),
+                "responded_at": datetime.now().isoformat()
+            }).execute()
 
-                if user_profile.data:
-                    patient_name = user_profile.data[0]['patient_name']
-                    response_text = f"Welcome back, {patient_name}! How can I help with your health today?"
-                else:
-                    response_text = "I don't recognize this number. Please register via our web form first!"
-                
-                # Send the response back to WhatsApp
-                send_template_message(sender_number, response_text)
+            ack_text = "✅ Great! Stay healthy." if status == "taken" else "⚠️ Noted. Stay safe!"
+            send_template_message(sender_number, ack_text)
+
+        # 3. Handle TEXT MESSAGES (AI Query)
+        elif msg.get("type") == "text":
+            user_text = msg["text"]["body"]
+            
+            # # Use Gemini to answer
+            # prompt = f"Patient {patient_name} asks: {user_text}. Context: This is a healthcare bot."
+            # gemini_response = model.generate_content(prompt) # Assuming 'model' is initialized
+            
+            send_template_message(sender_number, "Sorry, AI response is not implemented yet. But I got your message!")
 
     except Exception as e:
-        print(f"Error processing message: {e}")
+        print(f"Error: {e}")
 
     return {"status": "success"}
-
 
 
 def send_template_message(to,text):
