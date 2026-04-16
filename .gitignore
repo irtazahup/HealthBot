@@ -1,0 +1,11 @@
+# Credentials
+.env
+
+# Python environment
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# OS files
+.DS_Store
