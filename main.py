@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 import requests
 from supabase import create_client, Client
-import datetime
+from datetime import datetime
 
 load_dotenv()
 
@@ -68,25 +68,40 @@ async def handle_messages(request: Request):
         patient_name = patient_data['patient_name']
 
         # 2. Handle BUTTON CLICKS (Adherence)
+       # 2. Handle BUTTON CLICKS (Adherence)
+        # 2. Handle BUTTON CLICKS (Adherence)
         if msg.get("type") == "interactive":
             button_reply = msg['interactive']['button_reply']
-            button_id = button_reply['id'] # Format: "taken_REMINDER_ID"
+            button_id = button_reply['id'] 
             
             status = "taken" if "taken_" in button_id else "skipped"
             reminder_id = button_id.replace("taken_", "").replace("skipped_", "")
+            
+            # Use the current time to check against the scheduled slot
+            # Note: We query based on reminder_id since that's unique per slot anyway
+            existing_log = supabase.table("adherence_logs") \
+                .select("*") \
+                .eq("reminder_id", reminder_id) \
+                .execute()
 
-            # Log to Supabase
+            if existing_log.data:
+                # User already clicked a button for this specific reminder
+                current_status = existing_log.data[0]['status']
+                send_template_message(sender_number, f"This was already marked as *{current_status}*.")
+                return {"status": "already_responded"}
+
+            # If no log exists, proceed with the insert using your schema columns
             supabase.table("adherence_logs").insert({
                 "profile_id": patient_id,
                 "reminder_id": reminder_id,
+                # medication_id is in your schema, we should probably grab it or leave it null
                 "status": status,
-                "scheduled_time": datetime.now().isoformat(),
+                "scheduled_time": datetime.now().isoformat(), # This matches your unique constraint
                 "responded_at": datetime.now().isoformat()
             }).execute()
 
             ack_text = "✅ Great! Stay healthy." if status == "taken" else "⚠️ Noted. Stay safe!"
             send_template_message(sender_number, ack_text)
-
         # 3. Handle TEXT MESSAGES (AI Query)
         elif msg.get("type") == "text":
             user_text = msg["text"]["body"]
