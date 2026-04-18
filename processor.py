@@ -1,10 +1,12 @@
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-from brain import ask_health_agent
+# Import our new brain functions and tools
+from brain import get_ai_decision, get_final_answer
+from tools import AVAILABLE_TOOLS
 
 load_dotenv()
 
@@ -76,7 +78,7 @@ def process_whatsapp_webhook(payload):
             ack_text = "✅ Great! Stay healthy." if status == "taken" else "⚠️ Noted. Stay safe!"
             send_simple_message(sender_number, ack_text)
 
-        # 3. Handle TEXT MESSAGES (AI Intelligence)
+        # 3. Handle TEXT MESSAGES (Agentic Flow)
         elif msg.get("type") == "text":
             user_text = msg["text"]["body"]
 
@@ -87,39 +89,46 @@ def process_whatsapp_webhook(payload):
                 "content": user_text
             }).execute()
 
-            # B. Fetch Medication Data
-            med_query = supabase.table("medications").select("med_name, dosage").eq("profile_id", patient_id).execute()
-            med_context = str(med_query.data) if med_query.data else "No active medications."
-
-            # C. Fetch Adherence Logs (Last 7 Days)
-            seven_days_ago = (datetime.now() - timedelta(days=7)).isoformat()
-            adherence_query = supabase.table("adherence_logs") \
-                .select("status, scheduled_time, reminders(reminder_time)") \
-                .eq("profile_id", patient_id) \
-                .gte("scheduled_time", seven_days_ago) \
-                .execute()
-            adherence_context = str(adherence_query.data) if adherence_query.data else "No recent logs."
-
-            # D. Fetch Chat History (Last 5 messages)
+            # B. Fetch Recent Chat History (Last 5)
             history_query = supabase.table("conversations") \
                 .select("role, content") \
                 .eq("profile_id", patient_id) \
                 .order("created_at", desc=True) \
                 .limit(5) \
                 .execute()
-            chat_history = history_query.data[::-1] # Reverse to get chronological order
+            chat_history = history_query.data[::-1]
 
-            # E. Generate AI Response
-            ai_reply = ask_health_agent(user_text, patient_name, med_context, adherence_context, chat_history)
+            # C. PHASE 1: Get AI Decision
+            decision = get_ai_decision(user_text, patient_name, chat_history)
+
+            final_reply = ""
+
+            if decision.get("action") == "call_tool":
+                tool_name = decision.get("tool_name")
+                params = decision.get("parameters", {})
+                
+                # EXECUTION: Call the actual tool from tools.py
+                if tool_name in AVAILABLE_TOOLS:
+                    # Unpack params (like days=30 or med_name='Advil') into the function
+                    db_data = AVAILABLE_TOOLS[tool_name](patient_id, **params)
+                    
+                    # PHASE 2: Final Synthesis with DB Data
+                    final_reply = get_final_answer(user_text, patient_name, db_data, chat_history)
+                else:
+                    final_reply = "I tried to look that up but couldn't find the right tool. How else can I help?"
             
-            # F. Save Assistant Response & Send
+            else:
+                # Simple chat response
+                final_reply = decision.get("reply", "I'm here to help with your medications!")
+
+            # D. Save Assistant Response & Send
             supabase.table("conversations").insert({
                 "profile_id": patient_id,
                 "role": "assistant",
-                "content": ai_reply
+                "content": final_reply
             }).execute()
             
-            send_simple_message(sender_number, ai_reply)
+            send_simple_message(sender_number, final_reply)
 
     except Exception as e:
         print(f"Error in background processor: {e}")
