@@ -1,6 +1,5 @@
 import os
-import time
-from datetime import datetime
+from datetime import datetime, date
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import requests
@@ -12,6 +11,25 @@ ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 # Setup Supabase
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+
+
+def _parse_iso_date(raw_value):
+    if not raw_value:
+        return None
+    try:
+        return date.fromisoformat(str(raw_value))
+    except ValueError:
+        return None
+
+
+def _is_active_window(start_date_raw, end_date_raw, today_date):
+    start_date = _parse_iso_date(start_date_raw)
+    end_date = _parse_iso_date(end_date_raw)
+
+    if not start_date or not end_date:
+        return False
+
+    return start_date <= today_date <= end_date
 
 def send_medication_reminder(to_number, med_name, reminder_id):
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
@@ -59,20 +77,24 @@ def send_medication_reminder(to_number, med_name, reminder_id):
 def check_reminders():
     now = datetime.now()
     current_time = now.strftime("%H:%M:00") # Format: 08:00:00
-    current_date = now.strftime("%Y-%m-%d")
+    today_date = now.date()
+    today_iso = today_date.isoformat()
 
     print(f"Checking for reminders at {current_time}...")
 
     # Query: Find reminders where time matches AND current date is between start/end dates
     # We join with medications and profiles to get the phone number
     query = supabase.table("reminders").select(
-        "id, reminder_time, medications(med_name, start_date, end_date, profiles(patient_phone))"
-    ).eq("reminder_time", current_time).execute()
+        "id, reminder_time, medications!inner(med_name, start_date, end_date, profiles!inner(patient_phone))"
+    ).eq("reminder_time", current_time) \
+     .lte("medications.start_date", today_iso) \
+     .gte("medications.end_date", today_iso) \
+     .execute()
 
     for r in query.data:
         med = r['medications']
-        # Check if today is within the medication date range
-        if med['start_date'] <= current_date <= med['end_date']:
+        # Defensive check in code as a second safety layer.
+        if _is_active_window(med.get('start_date'), med.get('end_date'), today_date):
             phone = med['profiles']['patient_phone'].replace("+", "")
             send_medication_reminder(phone, med['med_name'], r['id'])
 
