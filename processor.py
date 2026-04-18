@@ -5,7 +5,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 
 # Import our new brain functions and tools
-from brain import get_ai_decision, get_final_answer, get_general_answer
+from brain import get_ai_decision, get_final_answer, get_general_answer, enforce_guardrails
 from tools import AVAILABLE_TOOLS, sanitize_tool_parameters, validate_tool_parameters
 
 load_dotenv()
@@ -200,6 +200,8 @@ def process_whatsapp_webhook(payload):
             else:
                 # General medical/small-talk path
                 final_reply = decision.get("reply") or get_general_answer(user_text, patient_name, chat_history)
+
+            final_reply = enforce_guardrails(user_text, patient_name, final_reply)
 
             # D. Save Assistant Response & Send
             supabase.table("conversations").insert({

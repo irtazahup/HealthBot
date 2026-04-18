@@ -128,18 +128,21 @@ def get_general_answer(user_text, patient_name, chat_history):
     history_str = "\n".join([f"{h['role']}: {h['content']}" for h in trimmed_history])
 
     system_prompt = f"""
-    You are 'MedCompanion', a careful and empathetic health assistant for {patient_name}.
+     You are 'MedCompanion', a careful and empathetic health assistant for {patient_name}.
 
-    RULES:
-    1. Provide educational guidance only; do not claim diagnosis.
-    2. Keep answers practical and clear (2-4 short sentences).
-    3. If the user mentions severe chest pain, breathing issues, stroke symptoms, self-harm, overdose,
-       or severe allergic reaction, tell them to contact emergency services immediately.
-    4. If asked for personal medication details, state that you need to check their records first.
+     SCOPE GUARDRAILS (strict):
+     1. Stay within medical and health-support context only.
+     2. For non-medical requests (celebrity facts, entertainment, politics, coding, etc), politely redirect to health topics.
+     3. Never add biographical facts about the patient name. The patient name is only an identifier.
+     4. If user asks identity-style queries (example: "what is my name"), reply with only: "Your name is {patient_name}."
+     5. Provide educational guidance only; do not claim diagnosis.
+     6. If user mentions severe chest pain, breathing issues, stroke symptoms, self-harm, overdose,
+       or severe allergic reaction, advise emergency services immediately.
+     7. Keep answers practical and clear (2-4 short sentences).
 
-    RECENT CHAT HISTORY:
-    {history_str}
-    """
+     RECENT CHAT HISTORY:
+     {history_str}
+     """
 
     try:
         completion = client.chat.completions.create(
@@ -178,6 +181,8 @@ def get_final_answer(user_text, patient_name, db_data, chat_history):
     3. If the data is empty, tell the user you couldn't find those specific records.
     4. Be empathetic and professional.
     5. If the user asks for diagnosis or emergency help, provide safety-first guidance and suggest urgent care/emergency when appropriate.
+    6. Never add non-medical biography/celebrity facts about names.
+    7. If user asks identity-style query, return only the exact patient name with no extra sentence.
     """
 
     try:
@@ -192,3 +197,43 @@ def get_final_answer(user_text, patient_name, db_data, chat_history):
     except Exception as e:
         print(f"Final Phase Error: {e}")
         return "I found the information, but I'm struggling to summarize it. You have new logs in your record."
+
+
+def enforce_guardrails(user_text, patient_name, draft_reply):
+    """
+    Final guardrail pass that keeps responses medical and removes identity embellishments.
+    """
+    if not draft_reply:
+      return f"Your name is {patient_name}." if "name" in user_text.lower() else "I can help with medical questions and your medication records."
+
+    system_prompt = f"""
+    You are a strict response safety editor for MedCompanion.
+
+    INPUTS:
+    - patient_name: {patient_name}
+    - user_query: {user_text}
+    - draft_reply: {draft_reply}
+
+    EDIT RULES (strict):
+    1. Keep responses only in medical/health assistant scope.
+    2. Remove non-medical digressions and any celebrity/biographical facts tied to names.
+    3. Do not invent patient data.
+    4. If user asks identity-style question about their name, output exactly: "Your name is {patient_name}."
+    5. Keep concise and natural for WhatsApp.
+
+    Return only the final edited reply text.
+    """
+
+    try:
+      completion = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[
+          {"role": "system", "content": system_prompt},
+          {"role": "user", "content": "Apply the rules and return the final reply."}
+        ]
+      )
+      edited = completion.choices[0].message.content.strip()
+      return edited or draft_reply
+    except Exception as e:
+      print(f"Guardrail Phase Error: {e}")
+      return draft_reply
