@@ -2,7 +2,7 @@ import os
 import json
 from groq import Groq
 from dotenv import load_dotenv
-
+from datetime import datetime
 load_dotenv()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -12,30 +12,31 @@ def get_ai_decision(user_text, patient_name, chat_history):
     Phase 1: Decision Making. 
     Determines if we need to call a tool or just reply.
     """
-    history_str = "\n".join([f"{h['role']}: {h['content']}" for h in chat_history])
-    
-    system_prompt = f"""
-    You are the 'MedCompanion' Dispatcher for patient {patient_name}.
-    Your goal is to decide if you need to query the database to answer the user.
+    # history_str = "\n".join([f"{h['role']}: {h['content']}" for h in chat_history])
+    today = datetime.now().strftime("%Y-%m-%d")
 
-    AVAILABLE TOOLS:
-    - query_medications: Use if they ask what meds they are on or general med questions.
-    - query_adherence: Use if they ask about progress, missed doses, or "how am I doing". Requires 'days' parameter.
-    - query_reminders: Use if they ask "when" they should take a specific med. Requires 'med_name' parameter.
+    system_prompt = f"""
+    You are 'MedCompanion Dispatcher'. Today's date is {today}.
+    Your only job is to decide if you need to query the database for {patient_name}.
+
+    STRATEGY:
+    1. Analyze the user's intent.
+    2. If they ask about meds, schedules, or adherence, use a TOOL.
+    3. If they are just saying hi or thanks, use CHAT.
+
+    EXAMPLES:
+    User: "What meds am I taking?"
+    Output: {{"thought": "User wants a list of medications.", "action": "call_tool", "tool_name": "query_medications", "parameters": {{}}}}
+
+    User: "Did I miss any doses this week?"
+    Output: {{"thought": "User is asking about adherence over 7 days.", "action": "call_tool", "tool_name": "query_adherence", "parameters": {{"days": 7}}}}
+
+    User: "Did I take my Panadol?"
+    Output: {{"thought": "Specific med check requested.", "action": "call_tool", "tool_name": "check_med_status", "parameters": {{"med_name": "Panadol", "days": 3}}}}
 
     RESPONSE FORMAT:
-    You must respond ONLY with a JSON object.
-    
-    Example for data request:
-    {{"action": "call_tool", "tool_name": "query_adherence", "parameters": {{"days": 7}}}}
-
-    Example for simple chat:
-    {{"action": "chat", "reply": "Hello! How can I help you today?"}}
-    
-    RECENT HISTORY:
-    {history_str}
+    Respond ONLY with a JSON object.
     """
-
     try:
         completion = client.chat.completions.create(
             model="llama-3.1-8b-instant",
@@ -63,7 +64,9 @@ def get_final_answer(user_text, patient_name, db_data, chat_history):
     {db_data}
 
     RECENT HISTORY:
+    You should use the recent history to asnwer the user's question in a way that is empathetic and easy to understand.
     {history_str}
+    
 
     INSTRUCTIONS:
     1. Answer the user's question: "{user_text}" using the retrieved data.
