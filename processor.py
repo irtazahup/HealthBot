@@ -5,12 +5,64 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 
 # Import our new brain functions and tools
-from brain import get_ai_decision, get_final_answer
-from tools import AVAILABLE_TOOLS
+from brain import get_ai_decision, get_final_answer, get_general_answer
+from tools import AVAILABLE_TOOLS, sanitize_tool_parameters, validate_tool_parameters
 
 load_dotenv()
 
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+
+
+def _format_medication_query_response(tool_name, db_data):
+    """
+    Deterministic formatter so medication date fields are never dropped by the LLM.
+    Returns a string reply when handled, otherwise None.
+    """
+    if tool_name not in {"query_medications", "query_health_snapshot"}:
+        return None
+
+    medications = []
+    reminder_preview = []
+
+    if tool_name == "query_medications":
+        if isinstance(db_data, list):
+            medications = db_data
+    elif isinstance(db_data, dict):
+        medications = db_data.get("medications") or []
+        reminder_preview = db_data.get("reminder_preview") or []
+
+    if not medications:
+        return "I could not find any medications in your records right now."
+
+    reminders_by_med = {}
+    for item in reminder_preview:
+        med_block = item.get("medications") if isinstance(item, dict) else None
+        med_name = ""
+        if isinstance(med_block, list) and med_block:
+            med_name = str(med_block[0].get("med_name", "")).strip()
+        elif isinstance(med_block, dict):
+            med_name = str(med_block.get("med_name", "")).strip()
+
+        reminder_time = str(item.get("reminder_time", "")).strip() if isinstance(item, dict) else ""
+        if med_name and reminder_time:
+            reminders_by_med.setdefault(med_name.lower(), []).append(reminder_time)
+
+    lines = ["Here are your medications with dates:"]
+    for idx, med in enumerate(medications, start=1):
+        med_name = str(med.get("med_name", "Unknown")).strip() if isinstance(med, dict) else "Unknown"
+        dosage = str(med.get("dosage", "Not set")).strip() if isinstance(med, dict) else "Not set"
+        start_date = str(med.get("start_date", "Not set")).strip() if isinstance(med, dict) else "Not set"
+        end_date = str(med.get("end_date", "Not set")).strip() if isinstance(med, dict) else "Not set"
+
+        lines.append(
+            f"{idx}. {med_name} ({dosage}) | Start: {start_date} | End: {end_date}"
+        )
+
+        times = reminders_by_med.get(med_name.lower(), [])
+        if times:
+            lines.append(f"   Time(s): {', '.join(times[:3])}")
+
+    return "\n".join(lines)
 
 def send_simple_message(to, text):
     url = f"https://graph.facebook.com/v25.0/{os.getenv('PHONE_NUMBER_ID')}/messages"
@@ -28,16 +80,27 @@ def send_simple_message(to, text):
     response = requests.post(url, headers=headers, json=data)
     return response.json()
 
+
+def _extract_incoming_message(payload):
+    try:
+        value = payload["entry"][0]["changes"][0]["value"]
+        messages = value.get("messages")
+        if not messages:
+            return None, None
+        return value, messages[0]
+    except (KeyError, IndexError, TypeError):
+        return None, None
+
 def process_whatsapp_webhook(payload):
     try:
-        value = payload['entry'][0]['changes'][0]['value']
-        messages = value.get('messages')
-        
-        if not messages:
+        value, msg = _extract_incoming_message(payload)
+        if not msg:
             return
 
-        msg = messages[0]
         sender_number = msg.get("from")
+        if not sender_number:
+            return
+
         clean_number = sender_number.replace("+", "")
 
         # 1. Identity Check
@@ -80,7 +143,12 @@ def process_whatsapp_webhook(payload):
 
         # 3. Handle TEXT MESSAGES (Agentic Flow)
         elif msg.get("type") == "text":
-            user_text = msg["text"]["body"]
+            user_text = msg.get("text", {}).get("body", "").strip()
+            if not user_text:
+                send_simple_message(sender_number, "I received an empty message. Please type your question.")
+                return
+
+            user_text = user_text[:1000]
 
             # A. Save User Message to Conversations
             supabase.table("conversations").insert({
@@ -105,21 +173,33 @@ def process_whatsapp_webhook(payload):
 
             if decision.get("action") == "call_tool":
                 tool_name = decision.get("tool_name")
-                params = decision.get("parameters", {})
+                params = sanitize_tool_parameters(tool_name, decision.get("parameters", {}))
                 
                 # EXECUTION: Call the actual tool from tools.py
                 if tool_name in AVAILABLE_TOOLS:
-                    # Unpack params (like days=30 or med_name='Advil') into the function
-                    db_data = AVAILABLE_TOOLS[tool_name](patient_id, **params)
-                    
-                    # PHASE 2: Final Synthesis with DB Data
-                    final_reply = get_final_answer(user_text, patient_name, db_data, chat_history)
+                    valid, reason = validate_tool_parameters(tool_name, params)
+                    if valid:
+                        try:
+                            db_data = AVAILABLE_TOOLS[tool_name](patient_id, **params)
+
+                            # Deterministic medication formatter keeps start/end dates intact.
+                            deterministic_reply = _format_medication_query_response(tool_name, db_data)
+                            if deterministic_reply:
+                                final_reply = deterministic_reply
+                            else:
+                                # PHASE 2: Final Synthesis with DB Data
+                                final_reply = get_final_answer(user_text, patient_name, db_data, chat_history)
+                        except Exception as tool_error:
+                            print(f"Tool execution failed ({tool_name}): {tool_error}")
+                            final_reply = get_general_answer(user_text, patient_name, chat_history)
+                    else:
+                        final_reply = f"I need a bit more detail to check your records: {reason}"
                 else:
-                    final_reply = "I tried to look that up but couldn't find the right tool. How else can I help?"
+                    final_reply = get_general_answer(user_text, patient_name, chat_history)
             
             else:
-                # Simple chat response
-                final_reply = decision.get("reply", "I'm here to help with your medications!")
+                # General medical/small-talk path
+                final_reply = decision.get("reply") or get_general_answer(user_text, patient_name, chat_history)
 
             # D. Save Assistant Response & Send
             supabase.table("conversations").insert({
